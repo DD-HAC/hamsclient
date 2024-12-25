@@ -2,8 +2,9 @@ import geopy
 import geopy.distance
 import json
 import logging
-import pandas as pd
 import requests  # type: ignore
+import datetime
+import csv
 
 from bs4 import BeautifulSoup
 from enum import Enum
@@ -28,10 +29,13 @@ _HEADERS = {
 }
 
 MS_BASE_URL = "https://www.meteosuisse.admin.ch"
-JSON_FORECAST_URL = "https://app-prod-ws.meteoswiss-app.ch/v1/forecast?plz={}00&graph=false&warning=true"
+JSON_FORECAST_URL = "https://app-prod-ws.meteoswiss-app.ch/v1/forecast?plz={}00&graph_startLowResolution=true&warning=true"
 MS_SEARCH_URL = "https://www.meteosuisse.admin.ch/home/actualite/infos.html?ort={}&pageIndex=0&tab=search_tab"
 CURRENT_CONDITION_URL = (
     "https://data.geo.admin.ch/ch.meteoschweiz.messwerte-aktuell/VQHA80.csv"
+)
+CURRENT_PRECIPITATION_URL = (
+    "https://data.geo.admin.ch/ch.meteoschweiz.messwerte-aktuell/VQHA98.csv"
 )
 STATION_URL = "https://data.geo.admin.ch/ch.meteoschweiz.messnetz-automatisch/ch.meteoschweiz.messnetz-automatisch_fr.csv"
 STATION_TYPE_PRECIPITATION = "Précipitation"
@@ -70,19 +74,62 @@ def DayForecast_from_meteoswiss_data(data: dict[str, Any]) -> DayForecast:
     )
 
 
+class HourlyForecast(TypedDict):
+    time: datetime.datetime
+    temperatureMax: float
+    temperatureMean: float
+    temperatureMin: float
+    precipitationMax: float
+    precipitationMean: float
+    precipitationMin: float
+
+
+def HourlyForecast_from_meteoswiss_data(data: dict[str, Any]) -> list[HourlyForecast]:
+    time = datetime.datetime.fromtimestamp(
+        data["start"] / 1000, tz=datetime.timezone.utc
+    )
+    results: list[HourlyForecast] = []
+    for idx in range(
+        min(
+            [
+                len(data["temperatureMin1h"]),
+                len(data["temperatureMax1h"]),
+                len(data["temperatureMean1h"]),
+                len(data["precipitationMin1h"]),
+                len(data["precipitationMean1h"]),
+                len(data["precipitationMax1h"]),
+            ]
+        )
+    ):
+        d = HourlyForecast(
+            time=time,
+            temperatureMax=data["temperatureMax1h"][idx],
+            temperatureMean=data["temperatureMean1h"][idx],
+            temperatureMin=data["temperatureMin1h"][idx],
+            precipitationMin=data["precipitationMin1h"][idx],
+            precipitationMean=data["precipitationMean1h"][idx],
+            precipitationMax=data["precipitationMax1h"][idx],
+        )
+        results.append(d)
+        time = time + datetime.timedelta(hours=1)
+    return results
+
+
 class Forecast(TypedDict):
     plz: str
     currentWeather: CurrentWeather
     regionForecast: list[DayForecast]
+    regionHourlyForecast: list[HourlyForecast]
 
 
-def Forecast_from_meteoswiss_data(data: dict[str, Any]):
+def Forecast_from_meteoswiss_data(data: dict[str, Any]) -> Forecast:
     return Forecast(
         plz=data["plz"],
         currentWeather=data["currentWeather"],
         regionForecast=[
             DayForecast_from_meteoswiss_data(x) for x in data["regionForecast"]
         ],
+        regionHourlyForecast=HourlyForecast_from_meteoswiss_data(data["graph"]),
     )
 
 
@@ -113,62 +160,77 @@ class CurrentCondition(TypedDict):
 
 def CurrentCondition_from_meteoswiss_data(data: dict[str, Any]) -> CurrentCondition:
     def floatornone(val: Any) -> float | None:
-        if val == "" or val == "-":
+        if val == "" or val == "-" or val is None:
             return None
         return float(val)
 
     return CurrentCondition(
         station=data["Station/Location"],
         date=int(data["Date"]),
-        tre200s0=floatornone(data["tre200s0"]),
-        rre150z0=floatornone(data["rre150z0"]),
-        sre000z0=floatornone(data["sre000z0"]),
-        gre000z0=floatornone(data["gre000z0"]),
-        ure200s0=floatornone(data["ure200s0"]),
-        tde200s0=floatornone(data["tde200s0"]),
-        dkl010z0=floatornone(data["dkl010z0"]),
-        fu3010z0=floatornone(data["fu3010z0"]),
-        fu3010z1=floatornone(data["fu3010z1"]),
-        prestas0=floatornone(data["prestas0"]),
-        pp0qffs0=floatornone(data["pp0qffs0"]),
-        pp0qnhs0=floatornone(data["pp0qnhs0"]),
-        ppz850s0=floatornone(data["ppz850s0"]),
-        ppz700s0=floatornone(data["ppz700s0"]),
-        dv1towz0=floatornone(data["dv1towz0"]),
-        fu3towz0=floatornone(data["fu3towz0"]),
-        fu3towz1=floatornone(data["fu3towz1"]),
-        ta1tows0=floatornone(data["ta1tows0"]),
-        uretows0=floatornone(data["uretows0"]),
-        tdetows0=floatornone(data["tdetows0"]),
+        tre200s0=floatornone(data.get("tre200s0")),
+        rre150z0=floatornone(data.get("rre150z0")),
+        sre000z0=floatornone(data.get("sre000z0")),
+        gre000z0=floatornone(data.get("gre000z0")),
+        ure200s0=floatornone(data.get("ure200s0")),
+        tde200s0=floatornone(data.get("tde200s0")),
+        dkl010z0=floatornone(data.get("dkl010z0")),
+        fu3010z0=floatornone(data.get("fu3010z0")),
+        fu3010z1=floatornone(data.get("fu3010z1")),
+        prestas0=floatornone(data.get("prestas0")),
+        pp0qffs0=floatornone(data.get("pp0qffs0")),
+        pp0qnhs0=floatornone(data.get("pp0qnhs0")),
+        ppz850s0=floatornone(data.get("ppz850s0")),
+        ppz700s0=floatornone(data.get("ppz700s0")),
+        dv1towz0=floatornone(data.get("dv1towz0")),
+        fu3towz0=floatornone(data.get("fu3towz0")),
+        fu3towz1=floatornone(data.get("fu3towz1")),
+        ta1tows0=floatornone(data.get("ta1tows0")),
+        uretows0=floatornone(data.get("uretows0")),
+        tdetows0=floatornone(data.get("tdetows0")),
     )
 
 
 class ClientResult(TypedDict):
     name: str
-    forecast: list[Forecast]
+    forecast: Forecast | None
+    # A list of current conditions for the first station passed.
     condition: list[CurrentCondition]
+    # A dictionary of station -> list of the current precipitation
+    # returned by the corresponding station.
+    condition_by_station: dict[str, CurrentCondition]
 
 
 def ClientResult_from_meteoswiss_data(data: dict[str, Any]) -> ClientResult:
+    if not data["forecast"].get("plz"):  # PLZ came back as zero or None, no forecast
+        forecast = None
+    else:
+        forecast = Forecast_from_meteoswiss_data(data["forecast"])
     return ClientResult(
         name=data["name"],
-        forecast=Forecast_from_meteoswiss_data(data["forecast"]),
+        forecast=forecast,
         condition=[CurrentCondition_from_meteoswiss_data(x) for x in data["condition"]],
+        condition_by_station={
+            station: CurrentCondition_from_meteoswiss_data(condition)
+            for (station, condition) in data["condition_by_station"].items()
+        },
     )
 
 
 class meteoSwissClient:
-    def __init__(self, displayName=None, postcode=None, station=None):
+    def __init__(self, displayName=None, postcode=None, *station: str):
         _LOGGER.debug("MS Client INIT")
         self._postCode = postcode
-        self._station = station
+        self._stations = station
         self._name = displayName
-        self._allStations = None
+        self._allStations: dict[str, Any] | None = None
         self._condition = None
+        self._conditions: dict[str, Any] = {}
+        self._precipitation = None
+        self._precipitations: dict[str, Any] = {}
         self._forecast = None
         _LOGGER.debug(
-            "INIT meteoswiss client : name = %s station = %s postcode = %s"
-            % (self._name, self._station, self._postCode)
+            "INIT meteoswiss client : name = %s stations = %s postcode = %s"
+            % (self._name, self._stations, self._postCode)
         )
 
     def get_data(self):
@@ -178,6 +240,7 @@ class meteoSwissClient:
             "name": self._name,
             "forecast": self._forecast,
             "condition": self._condition,
+            "condition_by_station": self._conditions,
         }
 
     def get_typed_data(self) -> ClientResult:
@@ -218,46 +281,76 @@ class meteoSwissClient:
         _LOGGER.debug("End of 24 forecast udate")
 
     def get_forecast(self):
-        _LOGGER.debug("Start update forecast data")
         s = requests.Session()
         # Forcing headers to avoid 500 error when downloading file
         s.headers.update(_HEADERS)
 
         jsonUrl = JSON_FORECAST_URL.format(self._postCode)
+        _LOGGER.debug("Start update forecast data with URL %s", jsonUrl)
         jsonData = s.get(jsonUrl, timeout=10)
-        jsonDataTxt = jsonData.text
-
-        jsonObj = json.loads(jsonDataTxt)
+        jsonData.raise_for_status()
+        jsonObj = jsonData.json()
 
         self._forecast = jsonObj
-        _LOGGER.debug("End of forecast udate")
+        _LOGGER.debug("End of forecast update")
 
     def get_current_condition(self):
         _LOGGER.debug("Update current condition")
-
-        data = pd.read_csv(CURRENT_CONDITION_URL, sep=";", header=0)
-
-        _LOGGER.debug("Get current condition for : %s" % self._station)
-        stationData = data.loc[data["Station/Location"].str.contains(self._station)]
-        stationData = stationData.to_dict("records")
-        self._condition = stationData
+        with requests.get(CURRENT_CONDITION_URL) as response:
+            response.raise_for_status()
+            response.encoding = "iso_8859_1"
+            lines = response.text.split("\n")
+            csv_reader = csv.DictReader(lines, delimiter=";")
+            data = [row for row in csv_reader if row]
+        with requests.get(CURRENT_PRECIPITATION_URL) as response:
+            response.raise_for_status()
+            response.encoding = "iso_8859_1"
+            lines = response.text.split("\n")
+            csv_reader = csv.DictReader(lines, delimiter=";")
+            rain_data = [row for row in csv_reader if row]
+        conditions = {}
+        condition_list = []
+        for station in self._stations:
+            _LOGGER.debug("Get current condition for : %s" % station)
+            stationData = [d for d in data if d["Station/Location"] == station]
+            rainData = [d for d in rain_data if d["Station/Location"] == station]
+            if rainData and not stationData:
+                stationData = rainData
+            elif rainData and stationData:
+                # Add all values from the rain data to the station data.
+                for k, v in rainData.items():
+                    stationData[k] = v
+            else:
+                # if
+                # (stationData and not rainData)
+                # or
+                # (not stationData and not rainData)
+                pass
+            condition_list.extend(stationData)
+            if stationData:
+                conditions[station] = stationData[0]
+        self._condition = condition_list
+        self._conditions = conditions
 
     def update(self):
         self.get_forecast()
         self.get_current_condition()
 
-    def __get_all_stations(self):
+    def __get_all_stations(self) -> dict[str, Any]:
         _LOGGER.debug("Getting all stations from : %s" % (STATION_URL))
-        data = pd.read_csv(
-            STATION_URL,
-            sep=";",
-            header=0,
-            skipfooter=4,
-            encoding="latin1",
-            engine="python",
-        )
+        with requests.get(STATION_URL) as response:
+            response.encoding = "iso_8859_1"
+            lines = response.text.split("\n")
+            csv_reader = csv.DictReader(lines, delimiter=";")
+            data = [row for row in csv_reader if row]
+
         stationList = {}
-        for index, line in data.iterrows():
+        for line in data:
+            if (
+                line["Type de station"] != STATION_TYPE_PRECIPITATION
+                and line["Type de station"] != STATION_TYPE_WEATHER
+            ):
+                continue
             stationData = {}
             stationData["code"] = line["Abr."]
             stationData["name"] = line["Station"]
@@ -269,7 +362,7 @@ class meteoSwissClient:
             elif line["Type de station"] == STATION_TYPE_WEATHER:
                 stationData["type"] = StationType.WEATHER
             else:
-                assert 0, "unknown station type %s" % line["Type de station"]
+                _LOGGER.debug("unknown station type %s" % line["Type de station"])
             stationList[stationData["code"]] = stationData
         return stationList
 
@@ -325,21 +418,26 @@ class meteoSwissClient:
             _LOGGER.warning("Unable to find station name for : %s" % (stationId))
             return None
 
-    def getGeoData(self, lat, lon):
+    def getGeoData(self, lat, lon, user_agent=None):
         s = requests.Session()
-        lat = str(lat)
-        lon = str(lon)
         s.headers.update(_HEADERS)
+        if user_agent:
+            s.headers.update({"User-Agent": user_agent})
 
-        geoData = s.get(
-            "https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat="
-            + lat
-            + "&lon="
-            + lon
-            + "&zoom=18"
-        ).text
-        _LOGGER.debug("Got data from OpenStreetMap: %s" % (geoData))
-        return json.loads(geoData)
+        uri = (
+            "https://nominatim.openstreetmap.org/reverse"
+            f"?format=jsonv2&lat={lat}&lon={lon}&zoom=18"
+        )
+        _LOGGER.debug("Requesting Nominatim OSM data at URL %s", uri)
+        geoData_req = s.get(uri)
+        try:
+            geoData_req.raise_for_status()
+            geoData = geoData_req.json()
+            _LOGGER.debug("Got data from OpenStreetMap: %s" % (geoData))
+            return geoData
+        except Exception:
+            _LOGGER.exception("Cannot get Nominatim OSM data: %s", geoData_req.text)
+            raise
 
     def getPostCode(self, lat, lon):
         geoData = self.getGeoData(lat, lon)
